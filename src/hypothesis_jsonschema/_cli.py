@@ -1,11 +1,17 @@
 """Command-line interface for hypothesis-jsonschema.
 
-This module provides a CLI for generating test data from JSON schemas and
-for fuzzing external programs against schema-conforming inputs.
+This module integrates with the Hypothesis CLI to provide JSON schema-based
+test data generation and fuzzing capabilities.
+
+Usage::
+
+    hypothesis json schema.json --num 100
+    hypothesis json '{"type": "integer"}' --num 10 --seed 42
+    hypothesis json schema.json --script ./test.sh --num 1000
+
 """
 
-import argparse
-import json
+import json as json_module
 import os
 import subprocess
 import sys
@@ -25,6 +31,12 @@ from hypothesis.database import DirectoryBasedExampleDatabase
 from . import from_schema
 from ._encode import encode_canonical_json
 
+# Lazy import click to match hypothesis.extra.cli pattern
+try:
+    import click
+except ImportError:
+    click = None  # type: ignore
+
 
 def load_schema(schema_arg: str) -> dict:
     """Load a JSON schema from a string or file path.
@@ -42,11 +54,11 @@ def load_schema(schema_arg: str) -> dict:
     # Check if it's a file path
     if os.path.isfile(schema_arg):
         with open(schema_arg, encoding="utf-8") as f:
-            return json.load(f)
+            return json_module.load(f)
     # Otherwise, parse as JSON string
     try:
-        return json.loads(schema_arg)
-    except json.JSONDecodeError as e:
+        return json_module.loads(schema_arg)
+    except json_module.JSONDecodeError as e:
         raise ValueError(
             f"Could not parse schema as JSON: {e}\n"
             f"If this is a file path, ensure the file exists."
@@ -175,7 +187,7 @@ def run_fuzz(
 
         # Write the test case to file
         with open(testcase_file, "w", encoding="utf-8") as f:
-            json.dump(value, f, indent=2)
+            json_module.dump(value, f, indent=2)
 
         # Run the external script
         result = subprocess.run(
@@ -202,7 +214,10 @@ def run_fuzz(
         print(f"{'=' * 60}", file=sys.stderr)
         print(f"Minimal failing example saved to: {testcase_file}", file=sys.stderr)
         if failure_example is not None:
-            print(f"\nFailing input:\n{json.dumps(failure_example, indent=2)}", file=sys.stderr)
+            print(
+                f"\nFailing input:\n{json_module.dumps(failure_example, indent=2)}",
+                file=sys.stderr,
+            )
         print(f"\nError: {e}", file=sys.stderr)
         return 1
 
@@ -211,118 +226,103 @@ def run_fuzz(
     return 0
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    """Main entry point for the CLI.
+# Only define CLI if click is available
+if click is not None:
+    import hypothesis.extra.cli
 
-    Args:
-        argv: Command-line arguments (defaults to sys.argv[1:]).
-
-    Returns:
-        Exit code (0 for success, non-zero for errors).
-    """
-    parser = argparse.ArgumentParser(
-        prog="hypothesis-jsonschema",
-        description="Generate test data from JSON schemas using Hypothesis.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Generate 100 examples from a schema file
-  hypothesis-jsonschema schema.json --num 100
-
-  # Generate examples with a fixed seed for reproducibility
-  hypothesis-jsonschema '{"type": "integer", "minimum": 0}' --num 10 --seed 42
-
-  # Fuzz a script with schema-conforming inputs
-  hypothesis-jsonschema schema.json --num 1000 --script ./test.sh
-
-  # Specify a custom testcase file for fuzzing
-  hypothesis-jsonschema schema.json --script ./test.sh --testcase input.json
-""",
-    )
-
-    parser.add_argument(
-        "schema",
-        help="JSON schema (as a string or path to a file)",
-    )
-    parser.add_argument(
-        "--num", "-n",
+    @hypothesis.extra.cli.main.command()  # type: ignore[union-attr]
+    @click.argument("schema", type=str)
+    @click.option(
+        "--num",
+        "-n",
         type=int,
         default=100,
         help="Number of examples to generate (default: 100)",
     )
-    parser.add_argument(
-        "--seed", "-s",
+    @click.option(
+        "--seed",
+        "-s",
         type=int,
         default=None,
         help="Random seed for reproducible output (generation mode only)",
     )
-    parser.add_argument(
+    @click.option(
         "--script",
         type=str,
         default=None,
         help="Script to run against each example (enables fuzz mode)",
     )
-    parser.add_argument(
+    @click.option(
         "--testcase",
         type=str,
         default="testcase.json",
         help="File path for test cases in fuzz mode (default: testcase.json)",
     )
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
+    @click.option(
+        "--verbose",
+        "-v",
+        is_flag=True,
         help="Enable verbose output",
     )
+    def json(
+        schema: str,
+        num: int,
+        seed: Optional[int],
+        script: Optional[str],
+        testcase: str,
+        verbose: bool,  # noqa: FBT001
+    ) -> None:
+        """Generate test data from JSON schemata.
 
-    args = parser.parse_args(argv)
+        SCHEMA can be a JSON string or a path to a JSON file.
 
-    # Load the schema
-    try:
-        schema = load_schema(args.schema)
-    except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"Error loading schema: {e}", file=sys.stderr)
-        return 1
-
-    # Dispatch to the appropriate mode
-    if args.script is not None:
-        # Fuzz mode
-        if args.seed is not None:
-            print(
-                "Warning: --seed is ignored in fuzz mode (database handles reproducibility)",
-                file=sys.stderr,
-            )
-        return run_fuzz(
-            schema=schema,
-            script=args.script,
-            num=args.num,
-            testcase_file=args.testcase,
-            verbose=args.verbose,
-        )
-    else:
-        # Generation mode
+        \b
+        Examples:
+            hypothesis json schema.json --num 100
+            hypothesis json '{"type": "integer", "minimum": 0}' --num 10 --seed 42
+            hypothesis json schema.json --script ./test.sh --num 1000
+        """
+        # Load the schema
         try:
-            examples = generate_examples(
-                schema=schema,
-                num=args.num,
-                seed_value=args.seed,
+            schema_dict = load_schema(schema)
+        except (ValueError, FileNotFoundError, json_module.JSONDecodeError) as e:
+            raise click.ClickException(f"Error loading schema: {e}") from e
+
+        # Dispatch to the appropriate mode
+        if script is not None:
+            # Fuzz mode
+            if seed is not None:
+                click.echo(
+                    "Warning: --seed is ignored in fuzz mode "
+                    "(database handles reproducibility)",
+                    err=True,
+                )
+            exit_code = run_fuzz(
+                schema=schema_dict,
+                script=script,
+                num=num,
+                testcase_file=testcase,
+                verbose=verbose,
             )
-        except Exception as e:
-            print(f"Error generating examples: {e}", file=sys.stderr)
-            return 1
+            sys.exit(exit_code)
+        else:
+            # Generation mode
+            try:
+                examples = generate_examples(
+                    schema=schema_dict,
+                    num=num,
+                    seed_value=seed,
+                )
+            except Exception as e:
+                raise click.ClickException(f"Error generating examples: {e}") from e
 
-        # Output one example per line
-        for example in examples:
-            print(json.dumps(example))
+            # Output one example per line
+            for example in examples:
+                click.echo(json_module.dumps(example))
 
-        if args.verbose and len(examples) < args.num:
-            print(
-                f"Warning: Only generated {len(examples)} unique examples "
-                f"(requested {args.num})",
-                file=sys.stderr,
-            )
-
-        return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+            if verbose and len(examples) < num:
+                click.echo(
+                    f"Warning: Only generated {len(examples)} unique examples "
+                    f"(requested {num})",
+                    err=True,
+                )

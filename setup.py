@@ -34,9 +34,8 @@ setuptools.setup(
     install_requires=["hypothesis>=6.84.3", "jsonschema>=4.18.0"],
     python_requires=">=3.8",
     entry_points={
-        "console_scripts": [
-            "hypothesis-jsonschema=hypothesis_jsonschema._cli:main",
-        ],
+        # Register with Hypothesis CLI to add 'hypothesis json' subcommand
+        "hypothesis": ["_ = hypothesis_jsonschema._cli"],
     },
     classifiers=[
         "Development Status :: 4 - Beta",
